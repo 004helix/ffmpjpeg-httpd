@@ -38,6 +38,7 @@ static int stdin_buflen = 0;
 static char *headers = NULL;
 static char *frame = NULL;
 static int frame_size = 0;
+static int skip = 0;
 
 struct http_client {
     struct http_client *next;
@@ -46,6 +47,7 @@ struct http_client {
     size_t reqsize;
     char *request;
     int waitreq;
+    int skip;
     int fd;
 };
 
@@ -194,6 +196,12 @@ static void on_stdin_read(int fd, short ev, void *arg)
             continue;
         }
 
+        if (client->skip) {
+            client->skip--;
+            client = client->next;
+            continue;
+        }
+
         iov[0].iov_base = headers;
         iov[0].iov_len = snprintf(headers, sizeof(headers),
             "Content-Type: image/jpeg\r\n"
@@ -222,6 +230,7 @@ static void on_stdin_read(int fd, short ev, void *arg)
             continue;
         }
 
+        client->skip = skip;
         client = client->next;
     }
 
@@ -357,6 +366,7 @@ static void on_http_accept(int fd, short ev, void *arg)
     client->reqsize = 0;
     client->request = NULL;
     client->waitreq = 1;
+    client->skip = 0;
 
     for (i = 0; i < sizeof(client->boundary) - 1; i++)
         client->boundary[i] = boundary_charset[rand() % (sizeof(boundary_charset) - 1)];
@@ -382,9 +392,8 @@ static void usage(exit_code) {
             " -v, --verbose         enable verbose output\n"
             " -a, --addr=ADDRESS    listen address, default loopback\n"
             " -p, --port=PORT       listen port, default 8080\n"
+            " -s, --skip=N          skip next N frames after each frame, default 0\n"
             " -b, --boundary        ffmpeg input boundary, default autodetect\n"
-            "     --input-formats   list input formats\n"
-            "     --output-formats  list output formats\n"
             "\n");
     exit(exit_code);
 }
@@ -422,12 +431,13 @@ int main(int argc, char **argv)
             {"help", no_argument, NULL, 'h'},
             {"addr", required_argument, NULL, 'a'},
             {"port", required_argument, NULL, 'p'},
+            {"skip", required_argument, NULL, 's'},
             {"boundary", required_argument, NULL, 'b'},
             {"verbose", no_argument, NULL, 'v'},
             {NULL, 0, NULL, 0}
         };
 
-        c = getopt_long(argc, argv, "ha:p:b:v", long_options, &option_index);
+        c = getopt_long(argc, argv, "ha:p:s:b:v", long_options, &option_index);
 
         if (c == -1)
             break;
@@ -449,6 +459,20 @@ int main(int argc, char **argv)
                 }
                 if (port < 1 || port > 65535) {
                     fprintf(stderr, "Port out of range: %d\n", port);
+                    usage(EXIT_FAILURE);
+                }
+                break;
+            }
+
+            case 's': {
+                char *endptr;
+                skip = strtol(optarg, &endptr, 10);
+                if (*endptr != '\0') {
+                    fprintf(stderr, "Bad skip: %s\n", endptr);
+                    usage(EXIT_FAILURE);
+                }
+                if (skip < 1) {
+                    fprintf(stderr, "Skip number too small: %d\n", skip);
                     usage(EXIT_FAILURE);
                 }
                 break;
