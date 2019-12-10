@@ -212,7 +212,7 @@ static void on_stdin_read(int fd, short ev, void *arg)
         iov[1].iov_len = frame_size;
         iov[2].iov_base = bndbuf;
         iov[2].iov_len = snprintf(bndbuf, sizeof(bndbuf),
-            "\r\n--%s\r\n", client->boundary);
+            "--%s\r\n", client->boundary);
 
         ret = writev(client->fd, iov, 3);
 
