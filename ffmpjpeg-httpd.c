@@ -48,6 +48,7 @@ struct http_client {
     char *request;
     int waitreq;
     int skip;
+    int rem;
     int fd;
 };
 
@@ -196,8 +197,8 @@ static void on_stdin_read(int fd, short ev, void *arg)
             continue;
         }
 
-        if (client->skip) {
-            client->skip--;
+        if (client->rem) {
+            client->rem--;
             client = client->next;
             continue;
         }
@@ -230,7 +231,7 @@ static void on_stdin_read(int fd, short ev, void *arg)
             continue;
         }
 
-        client->skip = skip;
+        client->rem = client->skip;
         client = client->next;
     }
 
@@ -304,6 +305,17 @@ static void on_http_read(int fd, short ev, void *arg)
     if (b == NULL)
         return;
 
+    if (client->reqsize > 11 && memcmp(client->request, "GET /?", 6) == 0) {
+        // search all digits after request
+        int i = 6;
+
+        while (client->request[i] >= '0' && client->request[i] <= '9')
+            i++;
+        client->request[i] = '\0';
+
+        client->skip = atoi(client->request + 6);
+    }
+
     /* whole request was read */
     client->waitreq = 0;
     free(client->request);
@@ -366,7 +378,8 @@ static void on_http_accept(int fd, short ev, void *arg)
     client->reqsize = 0;
     client->request = NULL;
     client->waitreq = 1;
-    client->skip = 0;
+    client->skip = skip;
+    client->rem = 0;
 
     for (i = 0; i < sizeof(client->boundary) - 1; i++)
         client->boundary[i] = boundary_charset[rand() % (sizeof(boundary_charset) - 1)];
@@ -384,7 +397,7 @@ static void on_http_accept(int fd, short ev, void *arg)
 }
 
 
-static void usage(exit_code) {
+static void usage(int exit_code) {
     fprintf(stderr, "Usage: ffhttp [option]...\n"
             "\n"
             "Options:\n"
@@ -392,8 +405,9 @@ static void usage(exit_code) {
             " -v, --verbose         enable verbose output\n"
             " -a, --addr=ADDRESS    listen address, default loopback\n"
             " -p, --port=PORT       listen port, default 8080\n"
-            " -s, --skip=N          skip next N frames after each frame, default 0\n"
             " -b, --boundary        ffmpeg input boundary, default autodetect\n"
+            " -s, --skip=N          skip next N frames after each frame if not\n"
+            "                       defined in request: GET /?N ..., default 0\n"
             "\n");
     exit(exit_code);
 }
