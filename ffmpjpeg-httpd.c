@@ -333,9 +333,6 @@ static void on_http_read(int fd, short ev, void *arg)
 
     /* whole request was read */
     client->waitreq = 0;
-    free(client->request);
-    client->request = NULL;
-    client->reqsize = 0;
 
     if (client->reqsize > 11 && memcmp(client->request, "GET /?", 6) == 0) {
         // search all digits after request
@@ -361,6 +358,10 @@ static void on_http_read(int fd, short ev, void *arg)
 
         client->snapshot = 0;
     }
+
+    free(client->request);
+    client->request = NULL;
+    client->reqsize = 0;
 
     /* reschedule read event without read timeout */
     event_del(&client->ev);
