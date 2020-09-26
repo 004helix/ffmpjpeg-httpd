@@ -46,6 +46,7 @@ struct http_client {
     struct event ev;
     size_t reqsize;
     char *request;
+    int snapshot;
     int waitreq;
     int skip;
     int rem;
@@ -53,13 +54,22 @@ struct http_client {
 };
 
 static struct http_client *http_clients = NULL;
-char http_reply_fmt[] =
+char http_reply_mpjpeg[] =
     "HTTP/1.1 200 OK\r\n"
     "Content-Type: multipart/x-mixed-replace; boundary=\"%s\"\r\n"
     "Cache-Control: no-store, no-cache, must-revalidate, pre-check=0, post-check=0, max-age=0\r\n"
     "Pragma: no-cache\r\n"
     "Expires: Sun, 1 Jan 2000 00:00:00 GMT\r\n"
     "Connection: close\r\n\r\n--%s\r\n";
+char http_reply_jpeg[] =
+    "HTTP/1.1 200 OK\r\n"
+    "Content-Type: image/jpeg\r\n"
+    "Content-Length: %d\r\n"
+    "Cache-Control: no-store, no-cache, must-revalidate, pre-check=0, post-check=0, max-age=0\r\n"
+    "Pragma: no-cache\r\n"
+    "Expires: Sun, 1 Jan 2000 00:00:00 GMT\r\n"
+    "Connection: close\r\n\r\n";
+
 
 
 static void http_client_close(struct http_client *client)
@@ -188,12 +198,28 @@ static void on_stdin_read(int fd, short ev, void *arg)
     /* send frame to http clients */
     for (client = http_clients; client;) {
         struct iovec iov[3];
-        char headers[128];
+        char headers[256];
         char bndbuf[64];
         ssize_t ret;
 
         if (client->waitreq) {
             client = client->next;
+            continue;
+        }
+
+        if (client->snapshot) {
+            struct http_client *to_close = client;
+
+            iov[0].iov_base = headers;
+            iov[0].iov_len = snprintf(headers, sizeof(headers),
+                                      http_reply_jpeg, frame_size);
+            iov[1].iov_base = frame;
+            iov[1].iov_len = frame_size;
+
+            ret = writev(client->fd, iov, 2);
+
+            client = client->next;
+            http_client_close(to_close);
             continue;
         }
 
@@ -316,20 +342,23 @@ static void on_http_read(int fd, short ev, void *arg)
         client->skip = atoi(client->request + 6);
     }
 
+    if (client->reqsize > 22)
+        client->snapshot = 0 == memcmp(client->request, "GET /snapshot.jpg", 17);
+
     /* whole request was read */
     client->waitreq = 0;
     free(client->request);
     client->request = NULL;
     client->reqsize = 0;
 
-    http_reply = malloc(sizeof(http_reply_fmt) + sizeof(client->boundary) * 2 + 1);
+    http_reply = malloc(sizeof(http_reply_mpjpeg) + sizeof(client->boundary) * 2 + 1);
     if (http_reply == NULL) {
         fprintf(stderr, "cannot allocate memory\n");
         goto close;
     }
 
-    snprintf(http_reply, sizeof(http_reply_fmt) + sizeof(client->boundary) * 2 + 1,
-             http_reply_fmt, client->boundary, client->boundary);
+    snprintf(http_reply, sizeof(http_reply_mpjpeg) + sizeof(client->boundary) * 2 + 1,
+             http_reply_mpjpeg, client->boundary, client->boundary);
 
     if (write(fd, http_reply, strlen(http_reply)) == -1) {
         free(http_reply);
@@ -398,7 +427,7 @@ static void on_http_accept(int fd, short ev, void *arg)
 
 
 static void usage(int exit_code) {
-    fprintf(stderr, "Usage: ffhttp [option]...\n"
+    fprintf(stderr, "Usage: ffmpjpeg-httpd [option]...\n"
             "\n"
             "Options:\n"
             " -h, --help            show this help\n"
@@ -408,6 +437,10 @@ static void usage(int exit_code) {
             " -b, --boundary        ffmpeg input boundary, default autodetect\n"
             " -s, --skip=N          skip next N frames after each frame if not\n"
             "                       defined in request: GET /?N ..., default 0\n"
+            "Requests:\n"
+            " GET /snapshot.jpg     get next available frame and close connection\n"
+            " GET /?<int>           skip next N frames after each frame\n"
+            " GET /                 default stream\n"
             "\n");
     exit(exit_code);
 }
