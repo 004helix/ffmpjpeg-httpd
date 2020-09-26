@@ -8,6 +8,7 @@
 #include <sys/uio.h>
 #include <string.h>
 #include <signal.h>
+#include <alloca.h>
 #include <unistd.h>
 #include <stdio.h>
 #include <fcntl.h>
@@ -279,7 +280,6 @@ static void on_stdin_read(int fd, short ev, void *arg)
 static void on_http_read(int fd, short ev, void *arg)
 {
     struct http_client *client = (struct http_client *)arg;
-    char *http_reply;
     char *buffer;
     ssize_t ret;
     int start;
@@ -331,6 +331,12 @@ static void on_http_read(int fd, short ev, void *arg)
     if (b == NULL)
         return;
 
+    /* whole request was read */
+    client->waitreq = 0;
+    free(client->request);
+    client->request = NULL;
+    client->reqsize = 0;
+
     if (client->reqsize > 11 && memcmp(client->request, "GET /?", 6) == 0) {
         // search all digits after request
         int i = 6;
@@ -342,30 +348,19 @@ static void on_http_read(int fd, short ev, void *arg)
         client->skip = atoi(client->request + 6);
     }
 
-    if (client->reqsize > 22)
-        client->snapshot = 0 == memcmp(client->request, "GET /snapshot.jpg", 17);
+    if (client->reqsize > 22 && memcmp(client->request, "GET /snapshot.jpg", 17) == 0) {
+        client->snapshot = 1;
+    } else {
+        char *http_reply = alloca(sizeof(http_reply_mpjpeg) + sizeof(client->boundary) * 2 + 1);
 
-    /* whole request was read */
-    client->waitreq = 0;
-    free(client->request);
-    client->request = NULL;
-    client->reqsize = 0;
+        snprintf(http_reply, sizeof(http_reply_mpjpeg) + sizeof(client->boundary) * 2 + 1,
+                 http_reply_mpjpeg, client->boundary, client->boundary);
 
-    http_reply = malloc(sizeof(http_reply_mpjpeg) + sizeof(client->boundary) * 2 + 1);
-    if (http_reply == NULL) {
-        fprintf(stderr, "cannot allocate memory\n");
-        goto close;
+        if (write(fd, http_reply, strlen(http_reply)) == -1)
+            goto close;
+
+        client->snapshot = 0;
     }
-
-    snprintf(http_reply, sizeof(http_reply_mpjpeg) + sizeof(client->boundary) * 2 + 1,
-             http_reply_mpjpeg, client->boundary, client->boundary);
-
-    if (write(fd, http_reply, strlen(http_reply)) == -1) {
-        free(http_reply);
-        goto close;
-    }
-
-    free(http_reply);
 
     /* reschedule read event without read timeout */
     event_del(&client->ev);
