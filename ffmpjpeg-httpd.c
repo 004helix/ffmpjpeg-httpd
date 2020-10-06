@@ -22,6 +22,7 @@
 #include <event2/event_struct.h>
 #include <event2/event.h>
 
+#define STDIN_BUFFER_SIZE 2097152  // 2MiB
 #define STDIN_READ_SIZE 32768
 #define HTTP_DEFAULT_ADDR "127.0.0.1"
 #define HTTP_DEFAULT_PORT 8080
@@ -32,13 +33,17 @@ const static char boundary_charset[] = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN
 static struct event_base *eb;
 static char *boundary = NULL;  // --ffmpeg\r\n
 static int boundary_len = 0;   // strlen(boundary)
-static int verbose = 0;
+static int nocache = 0;
 
-static char stdin_buffer[2097152];  // 2MiB
-static int stdin_buflen = 0;
+static char inbuffer1[STDIN_BUFFER_SIZE];
+static char inbuffer2[STDIN_BUFFER_SIZE];
+static char *inbuffer = inbuffer1;
+static int inbuf_len = 0;
 static char *headers = NULL;
 static char *frame = NULL;
 static int frame_size = 0;
+static char *prev = NULL;
+static int prev_size = 0;
 static int skip = 0;
 
 struct http_client {
@@ -70,7 +75,11 @@ char http_reply_jpeg[] =
     "Pragma: no-cache\r\n"
     "Expires: Sun, 1 Jan 2000 00:00:00 GMT\r\n"
     "Connection: close\r\n\r\n";
-
+char frame_headers[] =
+    "Content-Type: image/jpeg\r\n"
+    "Content-Length: %d\r\n"
+    "X-Timestamp: 0.000000\r\n"
+    "\r\n";
 
 
 static void http_client_close(struct http_client *client)
@@ -101,16 +110,15 @@ static void on_stdin_read(int fd, short ev, void *arg)
     void *c;
     int ret;
 
-    size = sizeof(stdin_buffer) - stdin_buflen;
+    /* read data into input buffer */
+    size = STDIN_BUFFER_SIZE - inbuf_len;
     if (size > STDIN_READ_SIZE)
         size = STDIN_READ_SIZE;
 
-    if (size == 0) {
-        fprintf(stderr, "stdin buffer overflow (bad boundary?)\n");
-        exit(EXIT_FAILURE);
-    }
+    if (size == 0)
+        errx(EXIT_FAILURE, "stdin buffer overflow (bad boundary?)");
 
-    ret = read(fd, stdin_buffer + stdin_buflen, size);
+    ret = read(fd, inbuffer + inbuf_len, size);
 
     if (ret == -1) {
         if (errno == EAGAIN || errno == EWOULDBLOCK)
@@ -122,31 +130,27 @@ static void on_stdin_read(int fd, short ev, void *arg)
     if (ret == 0)
         exit(EXIT_SUCCESS);
 
-    stdin_buflen += ret;
+    inbuf_len += ret;
 
     /* autodetect boundary */
     if (boundary == NULL) {
         int i;
 
-        if (stdin_buflen < 5)
+        if (inbuf_len < 5)
             return;
 
-        if (stdin_buffer[0] != '-' && stdin_buffer[1] != '-') {
-            fprintf(stderr, "cannot find boundary in input data\n");
-            exit(EXIT_FAILURE);
-        }
+        if (inbuffer[0] != '-' && inbuffer[1] != '-')
+            errx(EXIT_FAILURE, "cannot find boundary in input data");
 
-        for (i = 2; i < stdin_buflen && stdin_buffer[i] != '\r' && stdin_buffer[i] != '\n'; i++);
-        if (i == stdin_buflen)
+        for (i = 2; i < inbuf_len && inbuffer[i] != '\r' && inbuffer[i] != '\n'; i++);
+        if (i == inbuf_len)
             return;
 
         boundary = malloc(i + 3);
-        if (boundary == NULL) {
-            fprintf(stderr, "cannot allocate memory\n");
-            exit(EXIT_FAILURE);
-        }
+        if (boundary == NULL)
+            errx(EXIT_FAILURE, "cannot allocate memory");
 
-        memcpy(boundary, stdin_buffer, i);
+        memcpy(boundary, inbuffer, i);
         strcpy(boundary + i, "\r\n");
         boundary_len = strlen(boundary);
     }
@@ -154,7 +158,7 @@ static void on_stdin_read(int fd, short ev, void *arg)
     parse:
     /* search headers start */
     if (headers == NULL) {
-        c = memmem(stdin_buffer, stdin_buflen, boundary, boundary_len);
+        c = memmem(inbuffer, inbuf_len, boundary, boundary_len);
         if (c == NULL)
             return;
 
@@ -163,7 +167,7 @@ static void on_stdin_read(int fd, short ev, void *arg)
 
     /* search headers end */
     if (frame == NULL) {
-        c = memmem(headers, stdin_buflen - (headers - stdin_buffer), "\r\n\r\n", 4);
+        c = memmem(headers, inbuf_len - (headers - inbuffer), "\r\n\r\n", 4);
         if (c == NULL)
             return;
 
@@ -176,24 +180,20 @@ static void on_stdin_read(int fd, short ev, void *arg)
         char *header, *endptr;
 
         header = strcasestr(headers - 1, "\ncontent-length:");
-        if (header == NULL) {
-            fprintf(stderr, "cannot find content-length header\n");
-            exit(EXIT_FAILURE);
-        }
+        if (header == NULL)
+            errx(EXIT_FAILURE, "cannot find content-length header");
 
         header += 16;
         while (*header == ' ' || *header == '\t' || *header == '\r' || *header == '\n')
             header++;
 
         frame_size = strtol(header, &endptr, 10);
-        if ((*endptr != ' ' && *endptr != '\t' && *endptr != '\r' && *endptr != '\n' && *endptr != '\0') || frame_size <= 0) {
-            fprintf(stderr, "cannot parse content-length: %s\n", header);
-            exit(EXIT_FAILURE);
-        }
+        if ((*endptr != ' ' && *endptr != '\t' && *endptr != '\r' && *endptr != '\n' && *endptr != '\0') || frame_size <= 0)
+            errx(EXIT_FAILURE, "cannot parse content-length: %s", header);
     }
 
     /* check frame size */
-    if (frame_size > stdin_buflen - (frame - stdin_buffer))
+    if (frame_size > inbuf_len - (frame - inbuffer))
         return;
 
     /* send frame to http clients */
@@ -203,11 +203,14 @@ static void on_stdin_read(int fd, short ev, void *arg)
         char bndbuf[64];
         ssize_t ret;
 
+        /* client not sent full request yet */
         if (client->waitreq) {
             client = client->next;
             continue;
         }
 
+        /* client want snapshot, but previous frame
+           was not available on connect */
         if (client->snapshot) {
             struct http_client *to_close = client;
 
@@ -224,23 +227,22 @@ static void on_stdin_read(int fd, short ev, void *arg)
             continue;
         }
 
+        /* client requested frame skip */
         if (client->rem) {
             client->rem--;
             client = client->next;
             continue;
         }
 
+        /* send frame to client */
         iov[0].iov_base = headers;
         iov[0].iov_len = snprintf(headers, sizeof(headers),
-            "Content-Type: image/jpeg\r\n"
-            "Content-Length: %d\r\n"
-            "X-Timestamp: 0.000000\r\n"
-            "\r\n", frame_size);
+                                  frame_headers, frame_size);
         iov[1].iov_base = frame;
         iov[1].iov_len = frame_size;
         iov[2].iov_base = bndbuf;
         iov[2].iov_len = snprintf(bndbuf, sizeof(bndbuf),
-            "--%s\r\n", client->boundary);
+                                  "--%s\r\n", client->boundary);
 
         ret = writev(client->fd, iov, 3);
 
@@ -252,7 +254,7 @@ static void on_stdin_read(int fd, short ev, void *arg)
                 continue;
             }
 
-            warn("error writing packet");
+            warn("error writing frame");
             client = client->next;
             http_client_close(to_close);
             continue;
@@ -262,17 +264,34 @@ static void on_stdin_read(int fd, short ev, void *arg)
         client = client->next;
     }
 
+    /* reset headers pointer */
     headers = NULL;
-    size = stdin_buflen - (frame - stdin_buffer) - frame_size;
+
+    /* swap input buffer */
+    size = inbuf_len - (frame - inbuffer) - frame_size;
+
+    if (inbuffer == inbuffer1)
+        inbuffer = inbuffer2;
+    else
+        inbuffer = inbuffer1;
 
     if (size > 0)
-        memmove(stdin_buffer, frame + frame_size, size);
+        memcpy(inbuffer, frame + frame_size, size);
 
+    inbuf_len = size;
+
+    /* save previous frame */
+    if (nocache == 0) {
+        prev = frame;
+        prev_size = frame_size;
+    }
+
+    /* reset current frame */
     frame = NULL;
     frame_size = 0;
-    stdin_buflen = size;
 
-    if (stdin_buflen > 0)
+    /* retry parse left data in buffer */
+    if (inbuf_len > 0)
         goto parse;
 }
 
@@ -363,6 +382,43 @@ static void on_http_read(int fd, short ev, void *arg)
     client->request = NULL;
     client->reqsize = 0;
 
+    /* handle snapshot/first frame */
+    if (prev) {
+        struct iovec iov[3];
+        char headers[256];
+
+        if (client->snapshot) {
+            iov[0].iov_base = headers;
+            iov[0].iov_len = snprintf(headers, sizeof(headers),
+                                      http_reply_jpeg, prev_size);
+            iov[1].iov_base = prev;
+            iov[1].iov_len = prev_size;
+
+            writev(client->fd, iov, 2);
+            goto close;
+        } else {
+            char bndbuf[64];
+
+            iov[0].iov_base = headers;
+            iov[0].iov_len = snprintf(headers, sizeof(headers),
+                                      frame_headers, prev_size);
+            iov[1].iov_base = prev;
+            iov[1].iov_len = prev_size;
+            iov[2].iov_base = bndbuf;
+            iov[2].iov_len = snprintf(bndbuf, sizeof(bndbuf),
+                                      "--%s\r\n", client->boundary);
+
+            ret = writev(client->fd, iov, 3);
+
+            if (ret == -1 && errno != EAGAIN && errno != EWOULDBLOCK) {
+                warn("error writing frame");
+                goto close;
+            }
+
+            client->rem = client->skip;
+        }
+    }
+
     /* reschedule read event without read timeout */
     event_del(&client->ev);
     event_add(&client->ev, NULL);
@@ -427,10 +483,11 @@ static void usage(int exit_code) {
             "\n"
             "Options:\n"
             " -h, --help            show this help\n"
-            " -v, --verbose         enable verbose output\n"
             " -a, --addr=ADDRESS    listen address, default loopback\n"
             " -p, --port=PORT       listen port, default 8080\n"
             " -b, --boundary        ffmpeg input boundary, default autodetect\n"
+            " -n, --nocache         disable caching previous frame; it's used\n"
+            "                       as a snapshot and first frame for new clients\n"
             " -s, --skip=N          skip next N frames after each frame if not\n"
             "                       defined in request: GET /?N ..., default 0\n"
             "Requests:\n"
@@ -476,11 +533,11 @@ int main(int argc, char **argv)
             {"port", required_argument, NULL, 'p'},
             {"skip", required_argument, NULL, 's'},
             {"boundary", required_argument, NULL, 'b'},
-            {"verbose", no_argument, NULL, 'v'},
+            {"nocache", no_argument, NULL, 'n'},
             {NULL, 0, NULL, 0}
         };
 
-        c = getopt_long(argc, argv, "ha:p:s:b:v", long_options, &option_index);
+        c = getopt_long(argc, argv, "ha:p:s:b:n", long_options, &option_index);
 
         if (c == -1)
             break;
@@ -531,8 +588,8 @@ int main(int argc, char **argv)
                 snprintf(boundary, boundary_len + 1, "--%s\r\n", optarg);
                 break;
 
-            case 'v':
-                verbose++;
+            case 'n':
+                nocache++;
                 break;
 
             case '?':
