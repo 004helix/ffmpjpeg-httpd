@@ -1,3 +1,10 @@
+/*
+ * ffmpeg/mpjpeg http server
+ * (C) 2019-2022 Raman Shyhniou
+ *
+ * This code is licenced under the GPL.
+ */
+
 #define _GNU_SOURCE
 
 #include <sys/types.h>
@@ -306,7 +313,7 @@ static void on_http_read(int fd, short ev, void *arg)
 
     /* client read timeout */
     if (ev == EV_TIMEOUT) {
-        fprintf(stderr, "http client read timeout\n");
+        warnx("http client read timeout");
         goto close;
     }
 
@@ -317,7 +324,7 @@ static void on_http_read(int fd, short ev, void *arg)
     /* reallocate request buffer */
     buffer = realloc(client->request, client->reqsize + HTTP_READ_BUFFER);
     if (buffer == NULL) {
-        fprintf(stderr, "cannot allocate memory\n");
+        warnx("cannot allocate memory");
         goto close;
     }
     client->request = buffer;
@@ -449,7 +456,7 @@ static void on_http_accept(int fd, short ev, void *arg)
     /* allocate client context */
     client = malloc(sizeof(struct http_client));
     if (client == NULL) {
-        fprintf(stderr, "malloc failed\n");
+        warnx("cannot allocate memory");
         close(client_fd);
         return;
     }
@@ -479,22 +486,21 @@ static void on_http_accept(int fd, short ev, void *arg)
 
 
 static void usage(int exit_code) {
-    fprintf(stderr, "Usage: ffmpjpeg-httpd [option]...\n"
-            "\n"
-            "Options:\n"
-            " -h, --help            show this help\n"
-            " -a, --addr=ADDRESS    listen address, default loopback\n"
-            " -p, --port=PORT       listen port, default 8080\n"
-            " -b, --boundary        ffmpeg input boundary, default autodetect\n"
-            " -n, --nocache         disable caching previous frame; it's used\n"
-            "                       as a snapshot and first frame for new clients\n"
-            " -s, --skip=N          skip next N frames after each frame if not\n"
-            "                       defined in request: GET /?N ..., default 0\n"
-            "Requests:\n"
-            " GET /snapshot.jpg     get next available frame and close connection\n"
-            " GET /?<int>           skip next N frames after each frame\n"
-            " GET /                 default stream\n"
-            "\n");
+    warnx("Usage: ffmpjpeg-httpd [option]...\n"
+          "\n"
+          "Options:\n"
+          " -h, --help            show this help\n"
+          " -a, --addr=ADDRESS    listen address, default loopback\n"
+          " -p, --port=PORT       listen port, default 8080\n"
+          " -b, --boundary        ffmpeg input boundary, default autodetect\n"
+          " -n, --nocache         disable caching previous frame; it's used\n"
+          "                       as a snapshot and first frame for new clients\n"
+          " -s, --skip=N          skip next N frames after each frame if not\n"
+          "                       defined in request: GET /?N ..., default 0\n"
+          "Requests:\n"
+          " GET /snapshot.jpg     get next available frame and close connection\n"
+          " GET /?<int>           skip next N frames after each frame\n"
+          " GET /                 default stream\n");
     exit(exit_code);
 }
 
@@ -554,11 +560,11 @@ int main(int argc, char **argv)
                 char *endptr;
                 port = strtol(optarg, &endptr, 10);
                 if (*endptr != '\0') {
-                    fprintf(stderr, "Bad port: %s\n", endptr);
+                    warnx("Bad port: %s", endptr);
                     usage(EXIT_FAILURE);
                 }
                 if (port < 1 || port > 65535) {
-                    fprintf(stderr, "Port out of range: %d\n", port);
+                    warnx("Port out of range: %d", port);
                     usage(EXIT_FAILURE);
                 }
                 break;
@@ -568,11 +574,11 @@ int main(int argc, char **argv)
                 char *endptr;
                 skip = strtol(optarg, &endptr, 10);
                 if (*endptr != '\0') {
-                    fprintf(stderr, "Bad skip: %s\n", endptr);
+                    warnx("Bad skip: %s", endptr);
                     usage(EXIT_FAILURE);
                 }
                 if (skip < 1) {
-                    fprintf(stderr, "Skip number too small: %d\n", skip);
+                    warnx("Skip number too small: %d", skip);
                     usage(EXIT_FAILURE);
                 }
                 break;
@@ -581,10 +587,8 @@ int main(int argc, char **argv)
             case 'b':
                 boundary_len = strlen(optarg) + 4;
                 boundary = malloc(boundary_len + 1);
-                if (boundary == NULL) {
-                    fprintf(stderr, "cannot allocate memory\n");
-                    return EXIT_FAILURE;
-                }
+                if (boundary == NULL)
+                    errx(EXIT_FAILURE, "cannot allocate memory");
                 snprintf(boundary, boundary_len + 1, "--%s\r\n", optarg);
                 break;
 
@@ -602,7 +606,7 @@ int main(int argc, char **argv)
     }
 
     if (optind < argc) {
-        fprintf(stderr, "Unknown argument: %s\n", argv[optind]);
+        warnx("Unknown argument: %s", argv[optind]);
         usage(EXIT_FAILURE);
     }
 
@@ -623,14 +627,14 @@ int main(int argc, char **argv)
         ss.ss_family = AF_INET;
         ss_size = sizeof(struct sockaddr_in);
     } else {
-        fprintf(stderr, "Can't parse address: %s\n", addr);
+        warnx("Cannot parse address: %s", addr);
         usage(EXIT_FAILURE);
     }
 
     /* create, bind and listen socket */
     sock = socket(ss.ss_family, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
     if (sock < 0)
-        err(EXIT_FAILURE, "listen failed");
+        err(EXIT_FAILURE, "socket failed");
 
     c = 1;
     if (setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &c, sizeof(c)) == -1)
